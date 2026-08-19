@@ -1,0 +1,63 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck       # unchecked errors, including defer resp.Body.Close()
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose      # every http.Response body gets closed
+    - contextcheck   # ctx is threaded through, not dropped for context.Background()
+    - noctx          # no http request built without a context
+    - errorlint      # %w and errors.Is/As used correctly
+    - nilerr
+    - rowserrcheck
+    - copyloopvar
+    - durationcheck
+    - makezero
+    - prealloc
+    - unconvert
+    - wastedassign
+    - revive
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: indent-error-flow
+        - name: range-val-in-closure
+        - name: unexported-return
+
+  exclusions:
+    rules:
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - prealloc
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/archismandas/groww-go

@@ -1,0 +1,23 @@
+# Binaries and build output
+/bin/
+/dist/
+*.exe
+*.test
+
+# Coverage
+*.out
+coverage.html
+
+# Credentials — never commit an API key or TOTP secret
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+decisions.md
+explain.md
+flow.md

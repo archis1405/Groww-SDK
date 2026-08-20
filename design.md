@@ -10,17 +10,24 @@ commit as any public API change.
 
 ## Status
 
+Last reconciled against the code: 2026-08-21.
+
 | File | Zone | State |
 | --- | --- | --- |
 | `types/money.go` | written | done, tested |
+| `errors.go` | red | types and `classify` done; **no tests yet** |
 | `types/enums.go` | plain declarations | not started |
 | `types/*.go` (order, portfolio, marketdata, tick) | plain declarations | not started |
-| `errors.go` | red | **next** |
+| `client.go`, `auth.go` | red | **next** — `classify` has no caller until these exist |
 | `transport.go` | red | not started |
-| `client.go`, `auth.go` | red (has logic) | not started |
 | `orders.go` | red | not started |
 | `portfolio.go`, `marketdata.go` | red | not started |
 | `feed.go`, `feed_buffer.go` | red | not started |
+
+`go build`, `go vet`, `gofmt -l` and `go test -race ./...` are clean.
+`golangci-lint` has not been run — it is not installed locally, and `classify`
+and `errorEnvelope` currently have no callers, so `unused` (U1000) will fail
+`make lint` until `transport.go` lands.
 
 Authorship rule (from CLAUDE.md, tightened 2026-08-17): anything containing a
 branch, a loop or arithmetic is typed by hand. Only config, plain declarations
@@ -74,7 +81,7 @@ credentials. Options are `func(*Client)` — the plain functional-options patter
 no builder, no config struct, because the option set is small and additive.
 
 **`WithLiveTrading` is a safety interlock.** Every mutating call (place, modify,
-cancel) returns `ErrLiveTradingDisabled` unless it was passed. The live API costs
+cancel) returns `ErrLiveTradeNotSupported` unless it was passed. The live API costs
 ₹499+tax/month and places real orders against a real account; the default must be
 that a mistake is inert.
 
@@ -85,13 +92,13 @@ Hierarchy supports `errors.Is` for kinds and `errors.As` for detail.
 ```go
 // Sentinels — match with errors.Is.
 var (
-	ErrUnauthorized        error // 401, bad or expired credentials
-	ErrForbidden           error // 403, subscription or permission
-	ErrRateLimited         error // 429
-	ErrNotFound            error // 404
-	ErrInvalidRequest      error // other 4xx, caller's fault, never retried
-	ErrLiveTradingDisabled error // mutating call without WithLiveTrading
-	ErrOrderStateUnknown   error // place/modify timed out; landed or not, we cannot say
+	ErrUnauthorized          error // 401, bad or expired credentials
+	ErrForbidden             error // 403, subscription or permission
+	ErrRateLimited           error // 429
+	ErrNotFound              error // 404
+	ErrInvalidRequest        error // other 4xx, caller's fault
+	ErrLiveTradeNotSupported error // mutating call without WithLiveTrading
+	ErrOrderStateUnknown     error // place/modify timed out; landed or not, we cannot say
 
 	// 5xx is two levels: the leaves wrap the parent, so errors.Is matches
 	// either. See ADR 006.
@@ -100,13 +107,13 @@ var (
 	ErrServiceUnavailable error // 503, wraps ErrServer
 )
 
-// APIError — the server answered with an error body.
+// APIError — the server answered with an error response.
 type APIError struct {
 	StatusCode int
 	Code       string // Groww's error code ⚠
 	Message    string
 	RequestID  string
-	Retryable  bool
+	Retryable  bool   // set by classify, consumed by transport.go
 }
 
 func (e *APIError) Error() string
@@ -114,10 +121,9 @@ func (e *APIError) Is(target error) bool   // maps StatusCode → sentinel
 
 // TransportError — the request never produced a usable response.
 type TransportError struct {
-	Op        string // "place_order"
-	Attempts  int
-	Retryable bool
-	Err       error  // net.Error, url.Error, context deadline
+	Op       string // "place_order"
+	Attempts int
+	Err      error  // net.Error, url.Error, context deadline
 }
 
 func (e *TransportError) Error() string
@@ -125,8 +131,9 @@ func (e *TransportError) Unwrap() error
 
 // ValidationError — rejected locally, before any network call.
 type ValidationError struct {
-	Field   string
-	Message string
+	Field  string
+	Value  any    // what the caller actually passed
+	Reason string
 }
 
 func (e *ValidationError) Error() string
@@ -146,6 +153,44 @@ if errors.As(err, &apiErr) && apiErr.Code == "INSUFFICIENT_FUNDS" { … }
 A 400 carrying a duplicate-order code must never be retried; a connection reset
 before any byte was written can be. That distinction cannot be made from the
 status code alone.
+
+### Classification
+
+One unexported funnel turns a response into a typed error. Every HTTP path in
+the SDK goes through it, so there is exactly one place where status codes are
+interpreted.
+
+```go
+// errorEnvelope is the error body shape. ⚠ Field names unverified; the API may
+// use "message", "error", or neither, so every field is optional.
+type errorEnvelope struct {
+	Status  string `json:"status"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Error   string `json:"error"`
+}
+
+func classify(resp *http.Response, body []byte) error   // nil on 2xx
+```
+
+Behaviour:
+
+- 2xx → `nil`. The success path returns an untyped nil, never a typed nil
+  `*APIError`.
+- Non-2xx → `*APIError` carrying status, `X-Request-ID` ⚠, and whatever the
+  envelope yielded. A body that is not JSON at all — an HTML error page from an
+  intermediate proxy — is tolerated: the unmarshal error is deliberately
+  discarded and `Error()` falls back to `http.StatusText`.
+- `Retryable` is set to true for 429, 500, 502, 503 and 504, and left false
+  everywhere else.
+
+**`Retryable` means "the server-side failure is transient", not "it is safe to
+send this request again."** Those are different questions and only the caller
+knows the second one. A 502 on `GET /holdings` can be replayed freely; a 502 on
+`POST /order` may have been generated *after* the order was accepted, so
+replaying it can place a second order. `transport.go` must gate on both
+`Retryable` **and** whether the operation is mutating; `orders.go` reconciles
+rather than retries. See ADR 007 and `flow.md` flow 2.
 
 ## Transport
 
